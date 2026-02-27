@@ -64,6 +64,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.post("/api/tts", async (req, res) => {
+    try {
+      const { text } = req.body;
+
+      if (!text || typeof text !== "string") {
+        return res.status(400).json({ error: "Text is required" });
+      }
+
+      const cleanText = text.slice(0, 4096);
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-audio",
+        modalities: ["text", "audio"],
+        audio: { voice: "onyx", format: "mp3" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a British AI assistant with a deep, calm, and authoritative voice. Speak the following text in a measured, precise British accent — like a sophisticated AI system.",
+          },
+          {
+            role: "user",
+            content: `Speak this text in character: ${cleanText}`,
+          },
+        ],
+      });
+
+      const audioData = (response.choices[0]?.message as any)?.audio?.data ?? "";
+
+      if (!audioData) {
+        return res.status(500).json({ error: "No audio generated" });
+      }
+
+      res.json({ audio: audioData, format: "mp3" });
+    } catch (error) {
+      console.error("TTS error:", error);
+      res.status(500).json({ error: "Voice synthesis failed" });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }

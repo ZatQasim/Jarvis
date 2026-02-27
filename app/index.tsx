@@ -15,6 +15,8 @@ import { fetch } from "expo/fetch";
 import * as Haptics from "expo-haptics";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Feather } from "@expo/vector-icons";
+import { Audio } from "expo-av";
+import * as FileSystem from "expo-file-system";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -70,11 +72,49 @@ function ScanLine() {
 
   return (
     <Animated.View
-      style={[StyleSheet.absoluteFill, styles.scanLineWrapper, { pointerEvents: "none" }]}
+      style={[StyleSheet.absoluteFill, styles.scanLineWrapper]}
+      pointerEvents="none"
     >
       <Animated.View style={[styles.scanLine, style]} />
     </Animated.View>
   );
+}
+
+function SpeakingWave() {
+  const bars = [0, 1, 2, 3, 4, 5, 6];
+
+  return (
+    <View style={styles.waveContainer}>
+      {bars.map((i) => (
+        <AnimatedBar key={i} index={i} />
+      ))}
+    </View>
+  );
+}
+
+function AnimatedBar({ index }: { index: number }) {
+  const scaleY = useSharedValue(0.2);
+
+  useEffect(() => {
+    const delay = index * 80;
+    const timer = setTimeout(() => {
+      scaleY.value = withRepeat(
+        withSequence(
+          withTiming(1, { duration: 300 + index * 40, easing: Easing.inOut(Easing.ease) }),
+          withTiming(0.2, { duration: 300 + index * 40, easing: Easing.inOut(Easing.ease) })
+        ),
+        -1,
+        true
+      );
+    }, delay);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const style = useAnimatedStyle(() => ({
+    transform: [{ scaleY: scaleY.value }],
+  }));
+
+  return <Animated.View style={[styles.waveBar, style]} />;
 }
 
 function BootScreen({ onComplete }: { onComplete: () => void }) {
@@ -87,7 +127,7 @@ function BootScreen({ onComplete }: { onComplete: () => void }) {
     "INITIALIZING SYSTEMS...",
     "LOADING NEURAL NETWORK...",
     "ESTABLISHING SECURE LINK...",
-    "CALIBRATING RESPONSE MATRIX...",
+    "CALIBRATING VOICE MATRIX...",
     "JARVIS ONLINE.",
   ];
 
@@ -146,13 +186,84 @@ export default function JarvisScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [showTyping, setShowTyping] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const soundRef = useRef<Audio.Sound | null>(null);
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
   const bottomPad = Platform.OS === "web" ? 34 : insets.bottom;
 
+  useEffect(() => {
+    Audio.setAudioModeAsync({
+      playsInSilentModeIOS: true,
+      shouldDuckAndroid: true,
+    });
+    return () => {
+      soundRef.current?.unloadAsync();
+    };
+  }, []);
+
+  const stopCurrentAudio = async () => {
+    if (soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+      } catch {}
+      soundRef.current = null;
+    }
+    setIsSpeaking(false);
+  };
+
+  const playJarvisVoice = useCallback(async (text: string) => {
+    if (Platform.OS === "web") return;
+
+    try {
+      await stopCurrentAudio();
+
+      const baseUrl = getApiUrl();
+      const response = await fetch(`${baseUrl}api/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+
+      if (!response.ok) return;
+
+      const data = await response.json();
+      if (!data.audio) return;
+
+      const fileUri = FileSystem.cacheDirectory + "jarvis_voice.mp3";
+      await FileSystem.writeAsStringAsync(fileUri, data.audio, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      setIsSpeaking(true);
+      if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: fileUri },
+        { shouldPlay: true, volume: 1.0 }
+      );
+
+      soundRef.current = sound;
+
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          setIsSpeaking(false);
+          sound.unloadAsync();
+          soundRef.current = null;
+        }
+      });
+    } catch (e) {
+      console.error("Voice playback error:", e);
+      setIsSpeaking(false);
+    }
+  }, []);
+
   const handleSend = useCallback(async (text: string) => {
     if (isStreaming) return;
     if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    await stopCurrentAudio();
 
     const currentMessages = [...messages];
     const userMsg: Message = { id: genId(), role: "user", content: text };
@@ -160,6 +271,8 @@ export default function JarvisScreen() {
     setMessages((prev) => [...prev, userMsg]);
     setIsStreaming(true);
     setShowTyping(true);
+
+    let fullContent = "";
 
     try {
       const baseUrl = getApiUrl();
@@ -184,7 +297,6 @@ export default function JarvisScreen() {
 
       const decoder = new TextDecoder();
       let buffer = "";
-      let fullContent = "";
       let assistantAdded = false;
 
       while (true) {
@@ -227,17 +339,22 @@ export default function JarvisScreen() {
       }
 
       await saveConversation([...currentMessages, userMsg, { id: genId(), role: "assistant", content: fullContent }]);
+
+      if (fullContent) {
+        playJarvisVoice(fullContent);
+      }
     } catch {
       setShowTyping(false);
+      const errMsg = "I'm experiencing a temporary system disruption. Please try again, sir.";
       setMessages((prev) => [
         ...prev,
-        { id: genId(), role: "assistant", content: "I'm experiencing a temporary system disruption. Please try again, sir." },
+        { id: genId(), role: "assistant", content: errMsg },
       ]);
     } finally {
       setIsStreaming(false);
       setShowTyping(false);
     }
-  }, [messages, isStreaming]);
+  }, [messages, isStreaming, playJarvisVoice]);
 
   const saveConversation = async (msgs: Message[]) => {
     try {
@@ -257,6 +374,7 @@ export default function JarvisScreen() {
 
   const clearChat = () => {
     if (Platform.OS !== "web") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    stopCurrentAudio();
     setMessages([]);
   };
 
@@ -272,10 +390,19 @@ export default function JarvisScreen() {
         <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding" keyboardVerticalOffset={0}>
           <View style={[styles.header, { paddingTop: topPad + 8 }]}>
             <View style={styles.headerLeft}>
-              <View style={styles.statusDotLive} />
+              <View style={[styles.statusDotLive, isSpeaking && styles.statusDotSpeaking]} />
               <Text style={styles.headerTitle}>J.A.R.V.I.S.</Text>
+              {isSpeaking && <SpeakingWave />}
             </View>
             <View style={styles.headerRight}>
+              {isSpeaking && (
+                <Pressable
+                  onPress={stopCurrentAudio}
+                  style={({ pressed }) => [styles.headerBtn, styles.muteBtn, pressed && styles.headerBtnPressed]}
+                >
+                  <Feather name="volume-x" size={16} color={Colors.jarvis.cyan} />
+                </Pressable>
+              )}
               <Pressable
                 onPress={() => router.push("/history")}
                 style={({ pressed }) => [styles.headerBtn, pressed && styles.headerBtnPressed]}
@@ -361,6 +488,9 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: Colors.jarvis.cyan,
   },
+  statusDotSpeaking: {
+    backgroundColor: Colors.jarvis.blue,
+  },
   headerTitle: {
     fontFamily: "ShareTechMono_400Regular",
     fontSize: 18,
@@ -380,6 +510,10 @@ const styles = StyleSheet.create({
     borderColor: Colors.jarvis.border,
     alignItems: "center",
     justifyContent: "center",
+  },
+  muteBtn: {
+    borderColor: Colors.jarvis.dimLight,
+    backgroundColor: "rgba(0, 212, 255, 0.08)",
   },
   headerBtnPressed: {
     opacity: 0.6,
@@ -448,7 +582,6 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.jarvis.bg,
     alignItems: "center",
     justifyContent: "center",
-    gap: 0,
   },
   bootText: {
     alignItems: "center",
@@ -484,5 +617,17 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: Colors.jarvis.cyan,
     letterSpacing: 2,
+  },
+  waveContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    height: 16,
+  },
+  waveBar: {
+    width: 2.5,
+    height: 14,
+    borderRadius: 2,
+    backgroundColor: Colors.jarvis.cyan,
   },
 });
