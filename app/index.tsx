@@ -373,10 +373,12 @@ export default function JarvisScreen() {
         return;
       }
       try {
-        const fileUri = FileSystem.cacheDirectory + `jarvis_resp_${Date.now()}.mp3`;
-        await FileSystem.writeAsStringAsync(fileUri, audioBase64, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+        const fileUri = `${FileSystem.cacheDirectory}jarvis_resp_${Date.now()}.mp3`;
+        
+        // UPDATE: Using new SDK 54 File API
+        const file = new FileSystem.File(fileUri);
+        await file.write(audioBase64, { encoding: 'base64' });
+
         audioFileRef.current = fileUri;
         await AudioModule.setAudioModeAsync({
           playsInSilentModeIOS: true,
@@ -496,9 +498,10 @@ export default function JarvisScreen() {
           playsInSilentModeIOS: true,
         });
 
-        const audioBase64 = await FileSystem.readAsStringAsync(uri, {
-          encoding: FileSystem.EncodingType.Base64,
-        });
+        // UPDATE: Using new SDK 54 File API for reading
+        const file = new FileSystem.File(uri);
+        const audioBase64 = await file.read({ encoding: 'base64' });
+        
         await sendVoiceRequest(audioBase64);
       } catch {
         setVoiceState("idle");
